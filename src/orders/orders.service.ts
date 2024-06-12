@@ -19,16 +19,60 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
     this.logger.log('Database connected')
   }
   async create(createOrderDto: CreateOrderDto) {
-    const ids = [8, 9];
-    const products = await firstValueFrom(
-      this.productsCliente.send({ cmd: 'validate_products' }, ids)
-    )
-    return products
-    // return {
-    //   service: 'Orders Microservice',
-    //   createOrderDto: createOrderDto
-    // }
-    // return this.order.create({ data: createOrderDto });
+
+    try {
+      //1. Obtener id productos
+      const productIds = createOrderDto.items.map(item => item.productId);
+      const products: any[] = await firstValueFrom(
+        this.productsCliente.send({ cmd: 'validate_products' }, productIds)
+      )
+
+      // 2. Calcular valores
+      const totalAmount = createOrderDto.items.reduce((acc, orderItem) => {
+        const price = products.find(product => product.id === orderItem.productId).price;
+        return price * orderItem.quantity
+      }, 0);
+
+      const totalItems = createOrderDto.items.reduce((acc, orderItem) => {
+        return acc + orderItem.quantity
+      }, 0);
+
+      //3. Crear una transacción DB
+      const order = await this.order.create({
+        data: {
+          totalAmount,
+          totalItems,
+          OrderItem: {
+            createMany: {
+              data: createOrderDto.items.map(orderItem => ({
+                price: products.find(
+                  product => product.id === orderItem.productId
+                ).price,
+                productId: orderItem.productId,
+                quantity: orderItem.quantity
+              }))
+            }
+          }
+        },
+        include: {
+          OrderItem: {
+            select: {
+              price: true,
+              quantity: true,
+              productId: true,
+            }
+          }
+        }
+      })
+
+      return {
+        ...order, OrderItem: order.OrderItem.map((orderItem) => ({
+          ...orderItem, name: products.find(product => product.id === orderItem.productId).name
+        }))
+      };
+    } catch (error) {
+      throw new RpcException({ message: 'Check Logs', status: HttpStatus.BAD_REQUEST })
+    }
   }
 
   async findAll(orderPaginationDto: OrderPaginationDto) {
@@ -58,7 +102,16 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
 
   async findOne(id: string) {
     const order = await this.order.findUnique({
-      where: { id }
+      where: { id },
+      include: {
+        OrderItem: {
+          select: {
+            price: true,
+            quantity: true,
+            productId: true,
+          }
+        }
+      }
     });
 
     if (!order) {
@@ -67,7 +120,20 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
         message: `Order with id ${id} not found`
       })
     }
-    return order;
+
+    const productIds = order.OrderItem.map(item => item.productId);
+    const products = await firstValueFrom(
+      this.productsCliente.send({ cmd: 'validate_products' }, productIds)
+    )
+
+
+    return {
+      ...order, OrderItem: order.OrderItem.map((orderItem) => ({
+        ...orderItem,
+        name: products.find(product => product.id === orderItem.productId).name
+      }))
+    };
+
   }
 
   async changeOrderStatus(changeOrderStatus: ChangeOrderStatusDto) {
